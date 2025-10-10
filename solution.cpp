@@ -4,69 +4,59 @@ using namespace std;
 #define ll long long
 
 void solve() {
-    int n , m ;
-    cin>>n>>m;
-    vector<int> a(n) ; 
-    for(int i = 0 ; i<n ;i++){
-        cin>>a[i];
-    }
-    vector<int> count_m(m+1,0) ; 
-    int count = 0 ;
-    int ans = INT_MAX ;
-    int i = 0 , j =0 ;
-    sort(a.begin() , a.end());
-    while(i<n  ){
-        while(j<n && count <m){
-            
-            for(int k = 1 ; k*k <= a[j] && k<=m ; k++){
-                if(a[j]%k ==0){
-                    // cout<<a[j]<<' '<<k<<endl;
+    int n, m;
+    cin >> n >> m;
+    vector<int> a(n);
+    for (int &x : a) cin >> x;
 
-                    int fac1 = k , fac2 = a[j]/k ;
-                    if(count_m[fac1]==0)
-                        count++;
-                    count_m[fac1]++;
-                    if(fac2<=m && fac2!=fac1 ){
-                        if(count_m[fac2]==0){
-                            count++;
-                        }
-                        count_m[fac2]++;
-                    }
+    sort(a.begin(), a.end());
+    vector<int> cnt(m + 1, 0);
+    int covered = 0, ans = INT_MAX;
+    int j = 0;
+
+    auto add = [&](int x) {
+        for (int k = 1; k * k <= x; k++) {
+            if (x % k == 0) {
+                int d1 = k, d2 = x / k;
+                if (d1 <= m) {
+                    if (cnt[d1] == 0) covered++;
+                    cnt[d1]++;
+                }
+                if (d2 <= m && d2 != d1) {
+                    if (cnt[d2] == 0) covered++;
+                    cnt[d2]++;
                 }
             }
-            
-            if(count==m)
-                break ;
+        }
+    };
+    auto remove = [&](int x) {
+        for (int k = 1; k * k <= x; k++) {
+            if (x % k == 0) {
+                int d1 = k, d2 = x / k;
+                if (d1 <= m) {
+                    cnt[d1]--;
+                    if (cnt[d1] == 0) covered--;
+                }
+                if (d2 <= m && d2 != d1) {
+                    cnt[d2]--;
+                    if (cnt[d2] == 0) covered--;
+                }
+            }
+        }
+    };
+
+    for (int i = 0; i < n; i++) {
+        while (j < n && covered < m) {
+            add(a[j]);
             j++;
         }
-        if(count == m)
-            ans = min(ans , a[j]-a[i]);
-        
-        for(int k = 1 ; k*k <= a[i] && k<=m ; k++){
-            if(a[i]%k ==0){
-                int fac1 = k , fac2 = a[i]/k ;
-                count_m[fac1]--;
-                if(fac1!=fac2 && fac2<=m){
-                    count_m[fac2]--;
-                }
-                if(count_m[fac1]==0){
-                    count-- ;
-                }
-                if(fac2<=m && fac2!=fac1 && count_m[fac2]==0){
-                    count--;
-                }
-            }
-        }
-        
-        i++;
-
-
+        if (covered == m) ans = min(ans, a[j - 1] - a[i]);
+        remove(a[i]);
     }
-    if (ans == INT_MAX ){
-        ans = -1;
-    }
-    cout<<ans<<endl;
+
+    cout << (ans == INT_MAX ? -1 : ans) << "\n";
 }
+
 
 int main() {
 	ios_base::sync_with_stdio(false);
