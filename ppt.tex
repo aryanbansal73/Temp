@@ -1,0 +1,408 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+% Packages
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tikz}
+
+% Custom colors
+\definecolor{darkblue}{RGB}{0,51,102}
+\definecolor{lightblue}{RGB}{102,178,255}
+
+% Font settings
+\usefonttheme{professionalfonts}
+\setbeamerfont{title}{size=\LARGE,series=\bfseries}
+\setbeamerfont{frametitle}{size=\Large,series=\bfseries}
+
+% Remove navigation symbols
+\setbeamertemplate{navigation symbols}{}
+
+% Title page information
+\title{State Space Models, S4, S6, and Mamba}
+\subtitle{Beyond the Transformer}
+\author{Your Name}
+\institute{Your Affiliation}
+\date{\today}
+
+\begin{document}
+
+% Title Slide
+\begin{frame}
+    \titlepage
+    \vspace{-0.5cm}
+    \centering
+    \footnotesize{Source: Mamba (arXiv:2312.00752v2) and S4/SSM literature}
+\end{frame}
+
+% Slide 2 - Motivation
+\begin{frame}{Motivation: The Limits of Transformers}
+    \textbf{Core limitations of the Attention mechanism:}
+    \begin{itemize}
+        \item \textbf{Training Cost:} Quadratic complexity $O(L^2 D)$ with sequence length $L$
+        \item \textbf{Inference Cost:} Linear complexity $O(LD^2)$ and $O(LD)$ memory for KV cache
+        \item \textbf{Efficiency at Scale:} Severe memory and latency bottlenecks for very long sequences ($L > 50K$)
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \textbf{Goal: Achieve linear-time sequence modeling with:}
+    \begin{itemize}
+        \item \textbf{Long-Range Reasoning:} Capture global dependencies effectively
+        \item \textbf{Efficient Inference:} Constant-time per token generation, minimal state
+        \item \textbf{Parallel Training:} Maintain GPU-friendly parallelism
+    \end{itemize}
+\end{frame}
+
+% Slide 3 - SSM Foundation
+\begin{frame}{The Foundation: Continuous State Space Models}
+    SSMs are dynamical systems relating input $x(t)$ to output $y(t)$ via hidden state $h(t)$.
+    
+    \vspace{0.3cm}
+    \textbf{Continuous-Time SSM (LTI - Linear Time-Invariant):}
+    \begin{align}
+        \frac{dh(t)}{dt} &= A h(t) + B x(t) \\
+        y(t) &= C h(t) + D x(t) \quad (\text{usually } D=0)
+    \end{align}
+    
+    \begin{itemize}
+        \item $x(t) \in \mathbb{R}^D$: Input Signal
+        \item $h(t) \in \mathbb{R}^N$: State Vector (typically $N=16$ in Mamba)
+        \item $y(t) \in \mathbb{R}^D$: Output
+        \item $A \in \mathbb{R}^{N \times N}$: State transition matrix
+        \item $B \in \mathbb{R}^{N \times D}$: Input-to-state projection
+        \item $C \in \mathbb{R}^{D \times N}$: State-to-output projection
+    \end{itemize}
+    
+    \vspace{0.2cm}
+    \alert{Discretization required} to map continuous dynamics to discrete tokens $(x_k, h_k, y_k)$
+\end{frame}
+
+% Slide 4 - Discretization
+\begin{frame}{Discretization and the Convolution Kernel}
+    \textbf{Zero-Order Hold Discretization over timestep $\Delta$:}
+    \begin{equation}
+        h_k = \bar{A} h_{k-1} + \bar{B} x_k
+    \end{equation}
+    where $\bar{A}$ and $\bar{B}$ are functions of $(A, B, \Delta)$
+    
+    \vspace{0.5cm}
+    \textbf{Training Parallelism via Convolution:}
+    
+    Unrolling the recurrence yields:
+    \begin{equation}
+        y_k = \sum_{j=1}^{k} K_{k-j} x_j \quad \text{where} \quad K_j = C \bar{A}^{j} \bar{B}
+    \end{equation}
+    
+    \begin{itemize}
+        \item $K \in \mathbb{R}^{D \times L}$: Structured convolution kernel
+        \item Training: $y = K * x$ computable via FFT in $O(L \log L)$
+        \item Convolution enables \alert{parallel training}, recurrence enables \alert{fast inference}
+    \end{itemize}
+\end{frame}
+
+% Slide 5 - S4
+\begin{frame}{S4: Structured State Space Sequence Model}
+    S4 overcomes challenges in learning stable SSM parameters and computing $K$ efficiently.
+    
+    \vspace{0.3cm}
+    \textbf{Key Innovations:}
+    \begin{itemize}
+        \item \textbf{HiPPO Matrix $A$:} Initialization based on High-order Polynomial Projection Operator ensures optimal memory compression and stability
+        \item \textbf{Structured $A$:} Low-Rank + Diagonal or purely Diagonal structure allows fast kernel computation without $O(LN^2)$ complexity
+        \item \textbf{Parallel Training:} Uses $O(L \log L)$ convolution via FFT for GPU efficiency
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \alert{Key Limitation:} S4 is \textbf{Linear Time-Invariant (LTI)}
+    
+    \vspace{0.2cm}
+    The filter $K$ is \emph{fixed} regardless of input content — same processing for all sequences
+\end{frame}
+
+% Slide 6 - Need for Selectivity
+\begin{frame}{The Need for Selectivity (S6 Motivation)}
+    \textbf{LTI limitation is critical for discrete modalities like language:}
+    
+    \begin{itemize}
+        \item \textbf{Lack of Content-Awareness:} Attention selectively attends based on content; S4 applies fixed filter $K$
+        \item \textbf{Memory Rigidity:} S4 cannot dynamically forget irrelevant information or focus on critical tokens
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \begin{center}
+        \Large
+        \colorbox{lightblue!30}{%
+            \parbox{0.8\textwidth}{%
+                \centering
+                \textbf{Solution:} Make SSM parameters \alert{input-dependent (selective)}\\[0.2cm]
+                Transform from \textbf{LTI} $\rightarrow$ \textbf{LTV} (Linear Time-Varying)
+            }
+        }
+    \end{center}
+    
+    \vspace{0.3cm}
+    This is the \alert{crucial innovation} enabling language modeling performance!
+\end{frame}
+
+% Slide 7 - S6
+\begin{frame}{S6: The Selective State Space Model}
+    \textbf{Core Idea:} Make discretization step-size $\Delta$ and matrices $B, C$ \alert{functions of input} $x_k$
+    
+    \vspace{0.3cm}
+    Input $x_k$ generates selective parameters:
+    \begin{equation}
+        (\Delta_k, B_k, C_k) = \text{Project}(x_k)
+    \end{equation}
+    
+    \vspace{0.2cm}
+    Yielding time-varying discrete recurrence:
+    \begin{equation}
+        h_k = \hat{A}_k h_{k-1} + \hat{B}_k x_k \quad \text{where} \quad \hat{A}_k = \exp(\Delta_k A)
+    \end{equation}
+    
+    \vspace{0.3cm}
+    \textbf{Selective Mechanism:}
+    \begin{itemize}
+        \item Small $\Delta_k \implies \hat{A}_k \approx I + \Delta_k A$ $\rightarrow$ \alert{forget quickly}
+        \item Large $\Delta_k \implies \hat{A}_k \approx \exp(\Delta_k A)$ $\rightarrow$ \alert{remember long-term}
+    \end{itemize}
+    
+    \vspace{0.2cm}
+    The model learns to \emph{compress} or \emph{expand} time based on content!
+\end{frame}
+
+% Slide 8 - Discretization Details
+\begin{frame}{S6 Discretization (Zero-Order Hold Formulas)}
+    \textbf{ZOH transformation from $(A, B, \Delta_k)$ to $(\hat{A}_k, \hat{B}_k)$:}
+    
+    \begin{align}
+        \hat{A}_k &= \exp(\Delta_k A) \\
+        \hat{B}_k &= (\Delta_k A)^{-1} (\exp(\Delta_k A) - I) B
+    \end{align}
+    
+    \vspace{0.3cm}
+    \textbf{Simplification for diagonal $A$ (Mamba's choice):}
+    \begin{itemize}
+        \item Matrix inverse $(\Delta_k A)^{-1}$ becomes element-wise division
+        \item Matrix exponential $\exp(\Delta_k A)$ becomes element-wise exponential
+        \item Enables fast, numerically stable computation
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \alert{Key Point:} $\Delta_k, B_k, C_k$ are \textbf{selective} (input-dependent)\\
+    \phantom{\alert{Key Point:}} $A$ remains \textbf{fixed/learned} (not input-dependent)
+\end{frame}
+
+% Slide 9 - Parallel Scan
+\begin{frame}{Parallel Scan: Making LTV Training Possible}
+    LTV recurrence $h_k = \hat{A}_k h_{k-1} + \hat{B}_k x_k$ cannot use FFT convolution (no fixed $K$)
+    
+    \vspace{0.3cm}
+    \textbf{Solution: Parallel Scan (Prefix Sum) Algorithm}
+    
+    \begin{enumerate}
+        \item \textbf{Affine Operator:} Define $T_k(h) = \hat{A}_k h + \hat{B}_k x_k$ for each step
+        \item \textbf{Composition:} State $h_L = T_L \circ T_{L-1} \circ \cdots \circ T_1 (h_0)$
+        \item \textbf{Associativity:} $(T_3 \circ T_2) \circ T_1 = T_3 \circ (T_2 \circ T_1)$
+    \end{enumerate}
+    
+    \vspace{0.3cm}
+    \textbf{Binary operator:}
+    \begin{equation}
+        (A_2, b_2) \circ (A_1, b_1) = (A_2 A_1, A_2 b_1 + b_2)
+    \end{equation}
+    
+    \vspace{0.3cm}
+    Associativity $\rightarrow$ compute all prefixes in \alert{$O(\log L)$ depth} on parallel hardware\\
+    \emph{Hardware-aware kernel fuses discretization + scan in one optimized step}
+\end{frame}
+
+% Slide 10 - Mamba Block
+\begin{frame}{Mamba Block Architecture}
+    \begin{columns}[T]
+        \begin{column}{0.55\textwidth}
+            \textbf{M-shaped gated block replaces Attention + MLP:}
+            
+            \vspace{0.3cm}
+            \begin{enumerate}
+                \item \textbf{Expand:} $\tilde{\mathbf{x}} = \text{Linear}(\mathbf{x}) \in \mathbb{R}^{2ED}$
+                \item \textbf{Split:} $\mathbf{u}, \mathbf{v} \in \mathbb{R}^{ED}$
+                \item \textbf{S6 Layer:} $\mathbf{s} = \text{S6}(\mathbf{v})$\\
+                      $\mathbf{v}$ computes $(\Delta, B, C)$
+                \item \textbf{Gate:} $\mathbf{a} = \text{SiLU}(\mathbf{u})$
+                \item \textbf{Combine:} $\mathbf{z} = \mathbf{a} \odot \mathbf{s}$
+                \item \textbf{Project:} $\mathbf{y} = \text{Linear}(\mathbf{z})$
+            \end{enumerate}
+        \end{column}
+        \begin{column}{0.45\textwidth}
+            \vspace{0.5cm}
+            \textbf{Key Features:}
+            \begin{itemize}
+                \item \alert{Content-aware} via $\mathbf{v} \rightarrow (\Delta, B, C)$
+                \item \alert{Non-linearity} via $\text{SiLU}(\mathbf{u})$
+                \item \alert{Per-channel} S6 (D independent SSMs)
+                \item Similar to GLU structure
+            \end{itemize}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+% Slide 11 - Inference
+\begin{frame}{Mamba Inference (Recurrent Mode)}
+    \textbf{Constant-time per token update (given previous state $h_{t-1}$):}
+    
+    \vspace{0.3cm}
+    \begin{enumerate}
+        \item \textbf{Project:} Compute $\mathbf{u}_t, \mathbf{v}_t$ from $\mathbf{x}_t$
+        \item \textbf{Selective Params:} $\Delta_t, B_t, C_t = f(\mathbf{v}_t)$ via linear + softplus
+        \item \textbf{Discretize:} Compute $\hat{A}_t, \hat{B}_t$ using ZOH (element-wise for diagonal $A$)
+        \item \textbf{State Update:} $\mathbf{h}_t = \hat{A}_t \odot \mathbf{h}_{t-1} + \hat{B}_t \odot \mathbf{v}_t$ \quad $O(DN)$ ops
+        \item \textbf{Output:} $\mathbf{s}_t = C_t \mathbf{h}_t$
+        \item \textbf{Final:} $\mathbf{y}_t = \text{Linear}(\text{SiLU}(\mathbf{u}_t) \odot \mathbf{s}_t)$
+    \end{enumerate}
+    
+    \vspace{0.4cm}
+    \begin{center}
+        \Large
+        \colorbox{lightblue!30}{%
+            \parbox{0.7\textwidth}{%
+                \centering
+                Memory \& time per step: \alert{$O(DN)$}\\
+                \textbf{Constant} w.r.t. sequence length $L$!\\
+                ($N \approx 16 \implies$ very fast)
+            }
+        }
+    \end{center}
+\end{frame}
+
+% Slide 12 - Why it works
+\begin{frame}{Why Mamba Achieves Performance and Efficiency}
+    \begin{itemize}
+        \item \textbf{Unconstrained Speed:} $O(1)$ per token inference vs. $O(L)$ for Transformer KV cache
+        \item \textbf{Training Parallelism:} $O(\log L)$ depth Parallel Scan for fast GPU training
+        \item \textbf{Content-Awareness:} Selectivity handles discrete data (language) unlike LTI SSMs
+        \item \textbf{Hardware Optimization:} Fused kernel (Discretization + Scan) maximizes SRAM usage
+              \begin{itemize}
+                  \item 20-40× faster inner kernels vs. standard implementations
+              \end{itemize}
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \textbf{Empirical Result:}
+    \begin{center}
+        \large
+        Up to \alert{5× higher inference throughput} than optimized Transformers\\
+        (e.g., 2.8B Mamba vs. 2.7B Transformer)
+    \end{center}
+\end{frame}
+
+% Slide 13 - Comparison
+\begin{frame}{Comparison: Attention vs. SSMs vs. Mamba}
+    \small
+    \begin{table}
+        \centering
+        \begin{tabular}{@{}lccc@{}}
+            \toprule
+            \textbf{Feature} & \textbf{Transformer} & \textbf{S4} & \textbf{Mamba} \\
+            \midrule
+            Training Complexity & $O(L^2)$ & $O(L \log L)$ & $O(L \log L)$ \\
+            Inference Cost/Token & $O(L)$ (KV) & $O(1)$ & \alert{$O(1)$} \\
+            Content-Aware? & Yes & No (LTI) & \alert{Yes (Selective)} \\
+            Memory (Inference) & $O(LD)$ & $O(DN)$ & \alert{$O(DN)$} \\
+            Language Performance & Excellent & Poor/Mixed & \alert{Excellent} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.5cm}
+    \textbf{Key Advantage:}
+    \begin{center}
+        Mamba achieves \alert{content-awareness} + \alert{$O(1)$ inference} simultaneously
+    \end{center}
+\end{frame}
+
+% Slide 14 - Applications
+\begin{frame}{Practical Applications of Mamba}
+    Mamba excels where \textbf{long context} + \textbf{fast inference} are critical:
+    
+    \vspace{0.5cm}
+    \begin{itemize}
+        \item \textbf{Language Modeling:} Competitive with Transformers at 3-5× inference speed
+        \item \textbf{Genomics/DNA:} Handles million-token sequences infeasible for Attention
+        \item \textbf{Time-Series Forecasting:} Complex long-range dependencies in financial/climate data
+        \item \textbf{Audio/Waveform:} Traditional SSM strength + added selectivity
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \textbf{Scale Advantage:} Processes contexts that are \alert{impossible} for standard Attention
+\end{frame}
+
+% Slide 15 - Limitations
+\begin{frame}{Current Limitations and Future Research}
+    \begin{itemize}
+        \item \textbf{Engineering Complexity:} Requires custom CUDA/C++ kernels for advertised speedups
+              \begin{itemize}
+                  \item Not a simple drop-in replacement
+              \end{itemize}
+        \item \textbf{Training Stability:} SSM training needs careful parameterization (though Mamba helps)
+        \item \textbf{Fixed $A$ Matrix:} Only $B, C, \Delta$ are selective
+              \begin{itemize}
+                  \item Can making $A$ selective improve further? \emph{Open question}
+              \end{itemize}
+        \item \textbf{Vision/Multimodality:} Extending 1D Selective SSM to 2D/3D data is active research
+    \end{itemize}
+    
+    \vspace{0.4cm}
+    \alert{Implementation barrier} is high, but community adoption is growing
+\end{frame}
+
+% Slide 16 - Summary
+\begin{frame}{Summary: The Mamba Breakthrough}
+    \textbf{Evolution of State Space Models:}
+    
+    \vspace{0.3cm}
+    \begin{itemize}
+        \item \textbf{SSM:} Foundational continuous dynamics model for sequences
+        \item \textbf{S4:} Structured $A$ enables parallel training via $O(L \log L)$ convolution
+        \item \textbf{S6:} Added \alert{selectivity} ($\Delta, B, C$ input-dependent) for content-awareness
+        \item \textbf{Mamba:} First practical model combining:
+              \begin{itemize}
+                  \item Efficiency of \textbf{recurrent state} ($O(1)$ inference)
+                  \item Expressivity of \textbf{content-aware dynamics} (selective SSM)
+              \end{itemize}
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \begin{center}
+        \Large
+        \colorbox{lightblue!30}{%
+            \parbox{0.85\textwidth}{%
+                \centering
+                \textbf{Primary Takeaway:}\\
+                Transformer-level performance with \alert{$O(1)$ inference cost}
+            }
+        }
+    \end{center}
+\end{frame}
+
+% Slide 17 - References
+\begin{frame}{References \& Further Reading}
+    \begin{itemize}
+        \item Gu, A., \& Dao, T. (2023). \textit{Mamba: Linear-Time Sequence Modeling with Selective State Spaces}. arXiv:2312.00752v2
+        \item Gu, A., Goel, K., \& Ré, C. (2021). \textit{Efficiently Modeling Long Sequences with Structured State Spaces (S4)}
+        \item Related work: LSSL, S3, S5, H3
+        \item Blelloch, G. E. (1990). \textit{Prefix Sums and Their Applications}
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \centering
+    \Large
+    Questions?
+\end{frame}
+
+\end{document}
