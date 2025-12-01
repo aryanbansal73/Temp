@@ -1,0 +1,400 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{darkblue}{RGB}{0,51,102}
+\definecolor{lightblue}{RGB}{102,178,255}
+\definecolor{darkgreen}{RGB}{0,102,51}
+\definecolor{darkred}{RGB}{153,0,0}
+
+\usefonttheme{professionalfonts}
+\setbeamerfont{title}{size=\LARGE,series=\bfseries}
+\setbeamerfont{frametitle}{size=\Large,series=\bfseries}
+\setbeamertemplate{navigation symbols}{}
+
+\title{SSM Inference: Computational Breakdown}
+\subtitle{Operations for NPU Implementation}
+\author{Edge AI Team}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% Slide 1: S4 Inference Operations
+\begin{frame}{S4 Inference: Recurrent Mode Operations}
+    \textbf{Given:} Previous state $h_{t-1} \in \mathbb{R}^N$, input $x_t \in \mathbb{R}^D$
+    
+    \vspace{0.3cm}
+    \textbf{Per-token update (for each of D channels independently):}
+    
+    \begin{equation}
+        h_t = \bar{A} \odot h_{t-1} + \bar{B} \odot x_t
+    \end{equation}
+    \begin{equation}
+        y_t = C \cdot h_t
+    \end{equation}
+    
+    \vspace{0.3cm}
+    \begin{table}
+        \small
+        \centering
+        \begin{tabular}{@{}lccl@{}}
+            \toprule
+            \textbf{Operation} & \textbf{Shape} & \textbf{Ops} & \textbf{Type} \\
+            \midrule
+            $\bar{A} \odot h_{t-1}$ & $(N,)$ & $N$ & \textcolor{darkgreen}{Elementwise mult} \\
+            $\bar{B} \odot x_t$ & $(N,)$ & $N$ & \textcolor{darkgreen}{Elementwise mult} \\
+            Sum & $(N,)$ & $N$ & \textcolor{darkgreen}{Elementwise add} \\
+            $C \cdot h_t$ & $(N,) \to (1,)$ & $2N$ & \textcolor{darkblue}{Dot product} \\
+            \midrule
+            \textbf{Total per channel} & & $\mathbf{5N}$ & \\
+            \textbf{Total (D channels)} & & $\mathbf{5DN}$ & \textbf{All linear ops} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.2cm}
+    \alert{Key Point:} S4 is \textbf{purely linear} — no non-linear activations in core SSM!\\
+    \phantom{\alert{Key Point:}} $\bar{A}, \bar{B}, C$ are \textbf{fixed} (precomputed once)
+\end{frame}
+
+% Slide 2: S4 Memory and Bandwidth
+\begin{frame}{S4 Inference: Memory \& Bandwidth Analysis}
+    \textbf{State:} Must maintain $h_t \in \mathbb{R}^{D \times N}$ between tokens
+    
+    \vspace{0.3cm}
+    \textbf{Memory Footprint:}
+    \begin{itemize}
+        \item \textbf{Parameters:} $\bar{A}, \bar{B} \in \mathbb{R}^{D \times N}$, $C \in \mathbb{R}^{D \times N}$ (can be shared)
+        \item \textbf{State:} $h_t \in \mathbb{R}^{D \times N}$
+        \item \textbf{Total:} $\approx 4DN$ values (FP16: $8DN$ bytes)
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \textbf{Typical Values:} $D = 2048$, $N = 64 \implies 512$ KB state
+    
+    \vspace{0.3cm}
+    \begin{center}
+        \colorbox{lightblue!30}{%
+            \parbox{0.85\textwidth}{%
+                \textbf{Bandwidth Bottleneck:}\\
+                Compute: $5DN \approx 640K$ ops/token (FP16)\\
+                Memory: Load $3DN + DN$ params + state $\approx 4DN$ reads + $DN$ writes\\
+                \alert{Memory-bound} on most hardware (low arithmetic intensity)
+            }
+        }
+    \end{center}
+\end{frame}
+
+% Slide 3: S6 Discretization Operations
+\begin{frame}{S6/Mamba: Discretization Step (Added Complexity)}
+    \textbf{New:} Compute selective parameters from input $x_t$
+    
+    \vspace{0.2cm}
+    \textbf{Step 1: Generate selective params}
+    \begin{align}
+        \Delta_t &= \text{softplus}(W_\Delta \cdot x_t + b_\Delta) \quad \in \mathbb{R}^D \\
+        B_t &= W_B \cdot x_t \quad \in \mathbb{R}^{D \times N} \\
+        C_t &= W_C \cdot x_t \quad \in \mathbb{R}^{D \times N}
+    \end{align}
+    
+    \vspace{0.2cm}
+    \begin{table}
+        \footnotesize
+        \centering
+        \begin{tabular}{@{}lcl@{}}
+            \toprule
+            \textbf{Operation} & \textbf{Ops} & \textbf{Type} \\
+            \midrule
+            $W_\Delta \cdot x_t$ & $D^2$ & \textcolor{darkblue}{Matrix-vector mult} \\
+            softplus$(\cdot)$ & $D$ & \textcolor{darkred}{Non-linear (exp-based)} \\
+            $W_B \cdot x_t$ & $DN \times D$ & \textcolor{darkblue}{Matrix-vector mult} \\
+            $W_C \cdot x_t$ & $DN \times D$ & \textcolor{darkblue}{Matrix-vector mult} \\
+            \midrule
+            \textbf{Total} & $\mathbf{\approx 2D^2N + D^2}$ & \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \alert{This is the expensive part!} Parameter projection dominates compute
+\end{frame}
+
+% Slide 4: S6 Discretization (ZOH)
+\begin{frame}{S6/Mamba: Zero-Order Hold Discretization}
+    \textbf{Step 2: Discretize using $\Delta_t$} (assuming diagonal $A$)
+    
+    \vspace{0.3cm}
+    \begin{align}
+        \hat{A}_t &= \exp(\Delta_t \odot A) \quad \in \mathbb{R}^{D \times N} \\
+        \hat{B}_t &= (\Delta_t \odot A)^{-1} \odot (\exp(\Delta_t \odot A) - I) \odot B_t
+    \end{align}
+    
+    \vspace{0.2cm}
+    \textbf{Simplified for diagonal $A$ (elementwise):}
+    \begin{equation}
+        \hat{A}_{t,i,j} = \exp(\Delta_{t,i} \cdot A_{i,j}), \quad \hat{B}_{t,i,j} = \frac{\exp(\Delta_{t,i} \cdot A_{i,j}) - 1}{\Delta_{t,i} \cdot A_{i,j}} \cdot B_{t,i,j}
+    \end{equation}
+    
+    \vspace{0.3cm}
+    \begin{table}
+        \footnotesize
+        \centering
+        \begin{tabular}{@{}lcl@{}}
+            \toprule
+            \textbf{Operation} & \textbf{Ops} & \textbf{Type} \\
+            \midrule
+            $\Delta_t \odot A$ & $DN$ & \textcolor{darkgreen}{Elementwise mult} \\
+            $\exp(\cdot)$ & $DN$ & \textcolor{darkred}{Non-linear (exp)} \\
+            Division, subtraction & $3DN$ & \textcolor{darkgreen}{Elementwise arith} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+\end{frame}
+
+% Slide 5: S6 State Update
+\begin{frame}{S6/Mamba: Selective State Update}
+    \textbf{Step 3: Update state} (same form as S4, but with time-varying $\hat{A}_t, \hat{B}_t$)
+    
+    \vspace{0.3cm}
+    \begin{equation}
+        h_t = \hat{A}_t \odot h_{t-1} + \hat{B}_t \odot x_t
+    \end{equation}
+    \begin{equation}
+        y_t = C_t \cdot h_t
+    \end{equation}
+    
+    \vspace{0.3cm}
+    \begin{table}
+        \small
+        \centering
+        \begin{tabular}{@{}lccl@{}}
+            \toprule
+            \textbf{Operation} & \textbf{Shape} & \textbf{Ops} & \textbf{Type} \\
+            \midrule
+            $\hat{A}_t \odot h_{t-1}$ & $(D \times N)$ & $DN$ & \textcolor{darkgreen}{Elementwise mult} \\
+            $\hat{B}_t \odot x_t$ & $(D \times N)$ & $DN$ & \textcolor{darkgreen}{Elementwise mult} \\
+            Sum & $(D \times N)$ & $DN$ & \textcolor{darkgreen}{Elementwise add} \\
+            $C_t \cdot h_t$ & $(D \times N) \to (D,)$ & $2DN$ & \textcolor{darkblue}{Dot product (per channel)} \\
+            \midrule
+            \textbf{Total} & & $\mathbf{5DN}$ & \textbf{Same as S4!} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.2cm}
+    \alert{Difference from S4:} $\hat{A}_t, \hat{B}_t, C_t$ must be \textbf{recomputed every token}
+\end{frame}
+
+% Slide 6: Mamba Block Operations
+\begin{frame}{Mamba Block: Full Inference Path}
+    \textbf{Input:} $x \in \mathbb{R}^D$ $\rightarrow$ \textbf{Output:} $y \in \mathbb{R}^D$
+    
+    \vspace{0.2cm}
+    \small
+    \begin{enumerate}
+        \item \textbf{Expand:} $[u, v] = W_{\text{expand}} \cdot x$ \quad $(D \to 2ED)$
+              \begin{itemize}
+                  \footnotesize
+                  \item \textcolor{darkblue}{Matrix-vector mult}: $2ED \times D$ ops
+              \end{itemize}
+        
+        \item \textbf{Generate selective params:} $\Delta, B, C = f(v)$
+              \begin{itemize}
+                  \footnotesize
+                  \item \textcolor{darkblue}{3× Matrix-vector}: $\approx 2E^2D^2N$ ops
+                  \item \textcolor{darkred}{Softplus}: $ED$ ops
+              \end{itemize}
+        
+        \item \textbf{Discretize:} $\hat{A}, \hat{B} = \text{ZOH}(\Delta, A, B)$
+              \begin{itemize}
+                  \footnotesize
+                  \item \textcolor{darkred}{Exp}: $2EDN$ ops
+                  \item \textcolor{darkgreen}{Elementwise arith}: $3EDN$ ops
+              \end{itemize}
+        
+        \item \textbf{SSM update:} $h_t = \hat{A} \odot h_{t-1} + \hat{B} \odot v$, $s = C \cdot h_t$
+              \begin{itemize}
+                  \footnotesize
+                  \item \textcolor{darkgreen}{Elementwise}: $5EDN$ ops
+              \end{itemize}
+        
+        \item \textbf{Gate:} $z = \text{SiLU}(u) \odot s$
+              \begin{itemize}
+                  \footnotesize
+                  \item \textcolor{darkred}{SiLU (sigmoid + mult)}: $2ED$ ops
+                  \item \textcolor{darkgreen}{Elementwise mult}: $ED$ ops
+              \end{itemize}
+        
+        \item \textbf{Project:} $y = W_{\text{out}} \cdot z$ \quad $(ED \to D)$
+              \begin{itemize}
+                  \footnotesize
+                  \item \textcolor{darkblue}{Matrix-vector mult}: $ED \times D$ ops
+              \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+% Slide 7: Operation Breakdown
+\begin{frame}{Mamba Inference: Operation Type Breakdown}
+    \textbf{Compute Cost per Token (typical: $D=2048$, $N=16$, $E=2$):}
+    
+    \vspace{0.3cm}
+    \begin{table}
+        \small
+        \centering
+        \begin{tabular}{@{}lcc@{}}
+            \toprule
+            \textbf{Operation Category} & \textbf{Ops (approx)} & \textbf{\% of Total} \\
+            \midrule
+            \textcolor{darkblue}{Matrix-Vector Mult} & $2E^2D^2N + 3ED^2$ & \alert{$\sim$90\%} \\
+            \textcolor{darkgreen}{Elementwise (add/mult)} & $\sim 10EDN$ & $\sim$8\% \\
+            \textcolor{darkred}{Non-linear (exp, softplus, SiLU)} & $\sim 5EDN$ & $\sim$2\% \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.3cm}
+    \textbf{Total: $\approx 2.1 \times 10^8$ FLOPs/token} (for $D=2048$, $E=2$, $N=16$)
+    
+    \vspace{0.5cm}
+    \begin{center}
+        \colorbox{lightblue!30}{%
+            \parbox{0.85\textwidth}{%
+                \centering
+                \textbf{Key Insight for NPU:}\\
+                Parameter projections ($W_\Delta, W_B, W_C$) dominate\\
+                SSM recurrence itself ($5DN$ ops) is \alert{negligible} compared to projections!
+            }
+        }
+    \end{center}
+\end{frame}
+
+% Slide 8: Memory Access Pattern
+\begin{frame}{Mamba Inference: Memory Access Pattern}
+    \textbf{Critical bottleneck: Memory bandwidth}
+    
+    \vspace{0.3cm}
+    \textbf{Per-token memory movement:}
+    \begin{itemize}
+        \item \textbf{Weights:} $W_{\text{expand}}, W_\Delta, W_B, W_C, W_{\text{out}}$ \\
+              Size: $\approx 2ED^2 + 2EDN \cdot D + ED^2 \approx 4ED^2 + 2ED^2N$
+        \item \textbf{State:} Read $h_{t-1}$, write $h_t$ ($2EDN$ values)
+        \item \textbf{Fixed params:} $A$ (can be cached, $EDN$ values)
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \textbf{Arithmetic Intensity (AI):}
+    \begin{equation}
+        \text{AI} = \frac{\text{FLOPs}}{\text{Bytes moved}} \approx \frac{2E^2D^2N}{4 \times (4ED^2 + 2EDN)} \approx \frac{EN}{8 + 4N/D}
+    \end{equation}
+    
+    For $E=2, N=16, D=2048$: AI $\approx 4$ FLOPs/byte
+    
+    \vspace{0.3cm}
+    \alert{Compare to GEMM:} Can achieve AI $> 100$ with proper tiling\\
+    \alert{Mamba is memory-bound} on most accelerators
+\end{frame}
+
+% Slide 9: Hardware Optimization Opportunities
+\begin{frame}{NPU Optimization Opportunities}
+    \textbf{1. Kernel Fusion (Critical)}
+    \begin{itemize}
+        \item Fuse: Projection $\to$ Discretization $\to$ SSM update
+        \item Avoid writing intermediate $\Delta, B, C, \hat{A}, \hat{B}$ to DRAM
+        \item \alert{Mamba paper claims 20-40× speedup from fusion}
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \textbf{2. State Caching}
+    \begin{itemize}
+        \item Keep $h_t$ in fast SRAM/cache between tokens
+        \item Only $EDN$ values ($\approx$ 64KB for typical config)
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \textbf{3. Specialized Units}
+    \begin{itemize}
+        \item \textbf{Exponential:} Hardware exp() for discretization (appears 2DN times)
+        \item \textbf{Softplus/SiLU:} Can use LUT approximations
+        \item \textbf{Elementwise engine:} High-throughput for $\odot$ operations
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \textbf{4. Quantization}
+    \begin{itemize}
+        \item INT8 for matrix-vector products (90\% of compute)
+        \item FP16/BF16 for state updates (numerical stability)
+    \end{itemize}
+\end{frame}
+
+% Slide 10: S4 vs Mamba Comparison
+\begin{frame}{Inference Comparison: S4 vs Mamba}
+    \begin{table}
+        \small
+        \centering
+        \begin{tabular}{@{}lcc@{}}
+            \toprule
+            \textbf{Metric} & \textbf{S4} & \textbf{Mamba} \\
+            \midrule
+            Ops/token (core SSM) & $5DN$ & $5EDN$ \\
+            Ops/token (total) & $5DN$ & $2E^2D^2N + 10EDN$ \\
+            Non-linear ops & 0 & $\sim 5EDN$ (exp, SiLU) \\
+            Params recomputed/token & 0 & $\Delta, B, C$ \\
+            State size & $DN$ & $EDN$ \\
+            Memory bandwidth & Low & \alert{High (weight loading)} \\
+            \midrule
+            \textbf{Typical ratio} & \textbf{1×} & \textbf{$\sim$2000×} \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    
+    \vspace{0.5cm}
+    \begin{center}
+        \colorbox{yellow!30}{%
+            \parbox{0.85\textwidth}{%
+                \centering
+                \textbf{Critical Difference:}\\
+                S4: Lightweight recurrence with fixed params\\
+                Mamba: Expensive projections for selectivity\\
+                \alert{Selectivity costs $\sim$1000× more compute!}
+            }
+        }
+    \end{center}
+\end{frame}
+
+% Slide 11: Practical Implementation Notes
+\begin{frame}{Practical NPU Implementation Considerations}
+    \textbf{Dataflow:}
+    \begin{enumerate}
+        \item \textbf{Batch size = 1} (autoregressive generation)
+        \item \textbf{Sequence:} $x_1 \to h_1 \to x_2 \to h_2 \to \ldots$
+        \item Cannot parallelize across sequence (recurrent dependency)
+    \end{enumerate}
+    
+    \vspace{0.3cm}
+    \textbf{Throughput bottleneck:}
+    \begin{itemize}
+        \item Loading $W_\Delta, W_B, W_C$ from DRAM every token
+        \item For FP16: $2 \times (ED^2 + 2EDN \cdot D) \approx 67$ MB/token (D=2048, E=2, N=16)
+        \item At 100 GB/s bandwidth: \alert{0.67 ms/token minimum}
+    \end{itemize}
+    
+    \vspace{0.3cm}
+    \textbf{NPU Design Questions:}
+    \begin{itemize}
+        \item Can you fit all weights in on-chip SRAM? (Model-dependent)
+        \item Do you have dedicated exp() units or need software emulation?
+        \item What's your SRAM $\leftrightarrow$ compute pipeline depth for fusion?
+    \end{itemize}
+\end{frame}
+
+\end{document}
