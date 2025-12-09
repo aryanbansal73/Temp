@@ -1,0 +1,104 @@
+\documentclass{beamer}
+
+% Theme selection
+\usetheme{Madrid}
+\usecolortheme{default}
+
+% Title information
+\title[eMamba Acceleration]{eMamba: Efficient Acceleration Framework for Mamba Models in Edge Computing}
+\author{Based on Kim et al. (2025)}
+\date{\today}
+
+\begin{document}
+
+% Title Slide
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% Slide 1: Introducing eMamba
+\begin{frame}{Introducing eMamba}
+    \framesubtitle{An Efficient Acceleration Framework for Edge Devices}
+    
+    \begin{itemize}
+        \item \textbf{The Gap:} 
+        [cite_start]Mamba models offer linear complexity superior to Transformers but lack optimized hardware frameworks for resource-constrained edge devices[cite: 4, 5].
+        
+        \item \textbf{The Solution (eMamba):} 
+        [cite_start]A comprehensive, end-to-end hardware acceleration framework explicitly designed to deploy Mamba models on edge platforms like FPGAs and ASICs[cite: 6, 11].
+        
+        \item \textbf{Core Philosophy:} 
+        Maximizes computational efficiency through hardware-algorithm co-design. [cite_start]It replaces complex mathematical operations with hardware-friendly alternatives without sacrificing accuracy[cite: 7].
+        
+        \item \textbf{Deployment:} 
+        [cite_start]Validated on AMD ZCU102 FPGA and GlobalFoundries 22nm ASIC technology, proving real-world applicability[cite: 11].
+    \end{itemize}
+\end{frame}
+
+% Slide 2: Hardware-Aware Optimizations
+\begin{frame}{Hardware-Aware Optimizations}
+    \framesubtitle{Reducing Computational Complexity}
+    
+    \begin{itemize}
+        \item \textbf{Efficient Normalization:}
+        \begin{itemize}
+            [cite_start]\item Replaces resource-intensive \textbf{Layer Normalization} (requires square root/variance) with \textbf{Range Normalization}[cite: 7, 248].
+            [cite_start]\item Uses simple comparators ($\text{max}(x) - \text{min}(x)$) and learnable parameters to approximate standard deviation, significantly reducing hardware cost[cite: 257].
+        \end{itemize}
+        
+        \item \textbf{Simplified Non-Linearities:}
+        \begin{itemize}
+            \item \textbf{SiLU \& Exponentials:} Replaced with \textbf{Piecewise Linear Approximations}. [cite_start]This avoids complex exponentiation hardware by using discrete linear segments tailored to data distribution[cite: 7, 301, 332].
+            [cite_start]\item \textbf{Softplus to ReLU:} The resource-heavy Softplus function in the SSM block is replaced with ReLU, which is cheaper to implement and maintains model accuracy[cite: 329].
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+% Slide 3: Architectural Innovations
+\begin{frame}{Architectural Innovations}
+    \framesubtitle{Pipelining, NAS, and Quantization}
+    
+    \begin{itemize}
+        \item \textbf{Layer-Wise Pipelining:}
+        \begin{itemize}
+            [cite_start]\item Unlike Transformers that require the whole sequence, eMamba processes data \textbf{token-by-token}[cite: 344].
+            [cite_start]\item Implements a pipeline where each layer processes a token as soon as it is ready, maximizing throughput[cite: 339, 340].
+        \end{itemize}
+        
+        \item \textbf{Approximation-Aware NAS:}
+        \begin{itemize}
+            [cite_start]\item Uses Neural Architecture Search (NAS) to find optimal model configurations (e.g., state dimension $N$) that specifically account for the hardware approximations used[cite: 8].
+        \end{itemize}
+        
+        \item \textbf{Hybrid Quantization:}
+        \begin{itemize}
+            [cite_start]\item Implements a mixed-precision strategy: \textbf{Scale-aware quantization} for sensitive recurrent SSM states to prevent error accumulation, and standard \textbf{INT8} for all other layers[cite: 132, 434].
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+% Slide 4: Performance Evaluation
+\begin{frame}{Performance Evaluation}
+    \framesubtitle{eMamba vs. CNN \& ViT Accelerators}
+    
+    \begin{itemize}
+        \item \textbf{Speed \& Throughput:}
+        \begin{itemize}
+            [cite_start]\item \textbf{5.62x lower latency} and \textbf{9.95x higher throughput} compared to state-of-the-art CNN accelerators on FPGA[cite: 12, 80].
+            [cite_start]\item \textbf{4.95x lower latency} compared to Vision Transformer (ViT) accelerators[cite: 81].
+        \end{itemize}
+        
+        \item \textbf{Resource Efficiency (GF 22nm ASIC):}
+        \begin{itemize}
+            [cite_start]\item \textbf{4.77x smaller area} and \textbf{9.84x lower power} consumption than comparable ViT solutions[cite: 12, 81].
+            [cite_start]\item \textbf{48.6x lower energy consumption}, making it ideal for battery-powered edge devices[cite: 12].
+        \end{itemize}
+        
+        \item \textbf{Accuracy:}
+        \begin{itemize}
+            [cite_start]\item Maintains competitive accuracy on vision tasks (Fashion-MNIST, CIFAR-10, MARS) while using \textbf{1.63x--19.9x fewer parameters} than baseline models[cite: 9, 77].
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\end{document}
